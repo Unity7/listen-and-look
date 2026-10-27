@@ -1,0 +1,18 @@
+{
+ "title": "Release check: where it stands",
+ "subtitle": "Example deck: a status update with a table, a chart and a decision",
+ "project": "my-app",
+ "kpis": [
+  {"label": "Checks passing", "value": "28", "tone": "g"},
+  {"label": "Steps left", "value": "4", "tone": "acc"},
+  {"label": "Waiting on you", "value": "1", "tone": "a"}
+ ],
+ "chunks": [
+  {"md": "## Where we are\nThe first release builds cleanly and every check passes. This deck shows short pieces you can play one by one or all together, each with its picture on the right. Nothing plays until you press Play."},
+  {"md": "## Next steps\n| Step | What | Files | Proof | State |\n|---|---|---|---|---|\n| S1 | Login page | app/pages/login.py | unit tests | open |\n| S2 | Settings screen | app/pages/settings.py | unit tests | open |\n| S3 | Export to CSV | app/export.py | sample file | open |\n| S4 | Release notes | docs/RELEASE.md | review | open |"},
+  {"md": "Checks so far: every area passes, and the normalizer has the most coverage.",
+   "visual": {"kind": "chart", "label": "Chart · checks", "title": "Checks by area",
+    "html": "<svg viewBox='0 0 360 150' width='100%' role='img' aria-label='Checks by area'><g font-family='Segoe UI' font-size='11' fill='#8b949e'><text x='0' y='28'>Normalizer</text><text x='0' y='62'>Chunker</text><text x='0' y='96'>Page</text><text x='0' y='130'>Player</text></g><g fill='#58a6ff'><rect x='80' y='16' width='220' height='16' rx='3'/><rect x='80' y='50' width='120' height='16' rx='3'/><rect x='80' y='84' width='60' height='16' rx='3'/><rect x='80' y='118' width='90' height='16' rx='3'/></g><g font-family='Segoe UI' font-size='11' fill='#e6edf3'><text x='306' y='28'>14</text><text x='206' y='62'>7</text><text x='146' y='96'>3</text><text x='176' y='130'>4</text></g></svg>"}},
+  {"md": "Blocker: The export needs a new dependency.\nWhy: the standard library has no Excel writer.\nOption 1: add openpyxl and export .xlsx\nOption 2: export plain CSV only\nMy lean: Option 2, no new dependency.\nYour call: 1 or 2?"}
+ ]
+}

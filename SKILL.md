@@ -1,6 +1,6 @@
 ---
 name: listen-and-look
-description: "Turn a long reply, status report, plan or decision into a listen-and-look deck: the reply cut into short playable pieces (Play one, Play all, Stop, Resume, speed and voice), each paired with its picture (wide table, chart, diagram, code, or a blocker card with one-click option pills) on a follow-along stage, rendered with html_render in T3 Code (or opened as a local HTML page elsewhere). Nothing ever speaks until the user presses Play. Use when the user asks to hear or listen to a reply, wants a briefing they can play, says 'read it to me', 'chunk this', 'segment this', 'listen and look', or when a reply has a wide table, several sections, or a decision they must make. Works the same in Claude, Codex and Gemini chats."
+description: "Turn a long reply, status report, plan or decision into a listen-and-look deck: the reply cut into short playable pieces (Play one, Play all, Stop, Resume, speed and voice), each paired with its picture (wide table, chart, diagram, code, or a blocker card with one-click option pills) on a follow-along stage, rendered with html_render in T3 Code (or opened as a local HTML page elsewhere). Nothing ever speaks until the user presses Play. Use when the user asks to hear or listen to a reply, wants a briefing they can play, says 'read it to me', 'chunk this', 'segment this', 'listen and look', or when a reply has a wide table, several sections, or a decision they must make. Also a spoken conversation (talk mode): the agent answers out loud in a natural local voice and hears the reply through the microphone, turn by turn, until the user says stop; use when the user says 'talk mode', 'let's talk', 'talk to me' or 'voice chat'. Works the same in Claude, Codex and Gemini chats."
 ---
 
 # listen-and-look: playable pieces with their pictures
@@ -37,6 +37,37 @@ Files next to this one: `scripts/chunk_transform.py` (pure Python, standard libr
   and is spoken as "Code block in <lang>, <k> lines: <first comment or signature>".
 - A blocker becomes: Blocker + Why, one piece per option, My lean + Your call; every one of them shows the blocker card (numbered option
   pills; a click copies the reply text and fills the reply box, since the page cannot send into the chat).
+
+## Talk mode (a spoken conversation)
+
+The user talks, you answer out loud, they answer back. `scripts/talk.py` does the voice on this computer: Kokoro speaks, Whisper
+listens, no account or key. The microphone is open only while `listen` or `turn` runs, and only in talk mode.
+
+1. Start only when the user asks for it ("talk mode", "let's talk"). First time on a computer: `uv run <skill>/scripts/talk.py setup`
+   (about 650 MB of models, a few minutes; say so before it runs).
+2. Each turn: write your answer in the chat as normal, then speak a short version of it and listen for the reply in one call:
+   pipe the spoken text to `uv run <skill>/scripts/talk.py turn` (allow 3 minutes for the call). It prints
+   `{"heard": true, "text": "<what the user said>"}`; treat that text as the user's next message and answer it the same way.
+3. What you speak follows "Spoken style" below: one to three sentences, the answer first. Tables, code, lists of files and anything
+   long stay in the chat (or a deck); say "the details are in the chat".
+4. The user asks about another chat or project: in T3 Code use its thread tools (list, read, send, wait) to ask that chat or read its
+   last reply, then speak the answer. Say what you are doing first ("Checking the Scout chat, one moment").
+5. End talk mode when the user says stop, goodbye, "that's all" or "end talk mode", or when `heard` is false (nobody spoke for 60 s):
+   say one short goodbye with `say`, never `turn`, and stop calling the script.
+
+Options: `--voice` (`af_heart` default; also `af_bella`, `af_nicole`, `am_michael`, `am_adam`, `bf_emma`, `bm_george`), `--speed`
+(0.8-1.3), `--wait` (seconds to wait for speech), `--model` (Whisper size: `base` is faster, `small` the default, `medium` more
+accurate). `say "text"` and `listen` also work alone.
+
+## Spoken style (talk mode, and any `say` you write yourself)
+
+Talk like a person across the table, not a press release:
+- The answer first, then the reason. Skip the preamble ("Great question", "I'd be happy to") and the recap of what you just did.
+- Contractions and plain words: "it's", "don't", "use", "start", "help". Short sentences, with the odd longer one so it doesn't sound
+  robotic. One qualifier at most; pick a position.
+- Cut filler: "basically", "essentially", "it's worth noting", "in order to". Be specific: "three tests failed", not "some issues".
+- Numbers and names as people say them: "about two hundred", "the login page", never a file path, link, commit id or table read out.
+- Friendly and warm is fine; performed enthusiasm is not. A formal request from the user still gets a formal answer.
 
 ## Partial deck (charts, diagrams, KPIs)
 
@@ -78,4 +109,5 @@ chart | code | blocker | decision | sofar), badge, title, show_html, say, visual
 ## Run the tests
 
 From this folder: `uv run --no-project --with pytest --with playwright pytest -q tests` (run `uv run --no-project --with playwright
-playwright install chromium` once first; add `--with markdown-it-py` to cover the markdown-it path too).
+playwright install chromium` once first; add `--with markdown-it-py` to cover the markdown-it path too). The talk-mode round trip (`tests/test_talk.py`) runs once `talk.py setup`
+has downloaded the models; it plays no sound and opens no microphone.

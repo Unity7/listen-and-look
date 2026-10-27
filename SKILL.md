@@ -1,6 +1,6 @@
 ---
 name: listen-and-look
-description: "Turn a long reply, status report, plan or decision into a listen-and-look deck: the reply cut into short playable pieces (Play one, Play all, Stop, Resume, speed and voice), each paired with its picture (wide table, chart, diagram, code, or a blocker card with one-click option pills) on a follow-along stage, rendered with html_render in T3 Code (or opened as a local HTML page elsewhere). Nothing ever speaks until the user presses Play. Use when the user asks to hear or listen to a reply, wants a briefing they can play, says 'read it to me', 'chunk this', 'segment this', 'listen and look', or when a reply has a wide table, several sections, or a decision they must make. Also a spoken conversation (talk mode): the agent answers out loud in a natural local voice and hears the reply through the microphone, turn by turn, until the user says stop; use when the user says 'talk mode', 'let's talk', 'talk to me' or 'voice chat'. Works the same in Claude, Codex and Gemini chats."
+description: "Turn a long reply, status report, plan or decision into a listen-and-look deck: the reply cut into short playable pieces (Play one, Play all, Stop, Resume, speed and voice), each paired with its picture (wide table, chart, diagram, code, or a blocker card with one-click option pills) on a follow-along stage, rendered with html_render in T3 Code (or opened as a local HTML page elsewhere). Nothing ever speaks until the user presses Play. Use when the user asks to hear or listen to a reply, wants a briefing they can play, says 'read it to me', 'chunk this', 'segment this', 'listen and look', or when a reply has a wide table, several sections, or a decision they must make. Also a spoken conversation (talk mode): the agent answers out loud in a natural voice and hears the reply through the microphone, turn by turn, until the user says stop; use when the user says 'talk mode', 'let's talk', 'talk to me' or 'voice chat'. Works the same in Claude, Codex and Gemini chats."
 ---
 
 # listen-and-look: playable pieces with their pictures
@@ -19,6 +19,10 @@ Files next to this one: `scripts/chunk_transform.py` (pure Python, standard libr
 2. Save it to a scratch file and build the page (any shell; `uv run --no-project python` if `python` is not on PATH):
    `python <skill>/scripts/chunk_transform.py reply.md --title "<short title>" --project <name> --html deck.html`
    For charts, diagrams or KPI tiles, write a partial deck JSON instead and pass it as the source (see "Partial deck" below).
+   With `--html`, every piece is also recorded in Sonia's voice (Microsoft's British neural voice; a second or two, needs internet,
+   needs `uv`) into a `deck_audio` folder next to the page; keep that folder. Offline it uses Kokoro's British Emma if `talk.py setup`
+   has run, else the page falls back to the browser's voices. `--voice <name>` picks another voice (see Talk mode), `--voice browser`
+   skips the recording.
 3. In T3 Code: read `deck.html` and pass its whole text to `html_render` (title = the deck title); check with `html_preview` first when you
    changed the template or added hand-made visuals. Elsewhere: tell the user the path of `deck.html` to open in Edge or Chrome.
 4. Keep your chat reply short: one line on what the deck holds and what you need from the user. Do not repeat the deck in text.
@@ -40,8 +44,9 @@ Files next to this one: `scripts/chunk_transform.py` (pure Python, standard libr
 
 ## Talk mode (a spoken conversation)
 
-The user talks, you answer out loud, they answer back. `scripts/talk.py` does the voice on this computer: Kokoro speaks, Whisper
-listens, no account or key. The microphone is open only while `listen` or `turn` runs, and only in talk mode.
+The user talks, you answer out loud, they answer back. `scripts/talk.py` does the voice, with no account or key: Sonia speaks
+(Microsoft's British neural voice; needs internet, and the spoken text goes to Microsoft), falling back to Kokoro's British Emma on this
+computer when offline; Whisper listens on this computer. The microphone is open only while `listen` or `turn` runs, and only in talk mode.
 
 1. Start only when the user asks for it ("talk mode", "let's talk"). First time on a computer: `uv run <skill>/scripts/talk.py setup`
    (about 650 MB of models, a few minutes; say so before it runs).
@@ -55,7 +60,8 @@ listens, no account or key. The microphone is open only while `listen` or `turn`
 5. End talk mode when the user says stop, goodbye, "that's all" or "end talk mode", or when `heard` is false (nobody spoke for 60 s):
    say one short goodbye with `say`, never `turn`, and stop calling the script.
 
-Options: `--voice` (`af_heart` default; also `af_bella`, `af_nicole`, `am_michael`, `am_adam`, `bf_emma`, `bm_george`), `--speed`
+Options: `--voice` (`en-GB-SoniaNeural` default; other Microsoft voices such as `en-US-AvaMultilingualNeural`; or Kokoro, offline:
+`af_heart`, `af_bella`, `am_michael`, `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis`), `--speed`
 (0.8-1.3), `--wait` (seconds to wait for speech), `--model` (Whisper size: `base` is faster, `small` the default, `medium` more
 accurate). `say "text"` and `listen` also work alone.
 
@@ -94,14 +100,18 @@ chart | code | blocker | decision | sofar), badge, title, show_html, say, visual
 
 ## The page and the player
 
-- Test ids: `play-all`, `play-stop`, `play-resume`, `play-speed` (0.9x-1.5x), `play-voice` (`speechSynthesis.getVoices()`, an en-US
-  "Natural" voice preferred), `talk-chunk[data-chunk][data-say]`, `chunk-play`, `chunk-visual`, `sheet` (`#sheet-slot[data-id][data-kind]`),
+- Recorded pieces: a chunk's `audio` is `{png, src}`: the .mp3 packed into a PNG (`png`, an absolute path, because T3's `html_render`
+  inlines local images and nothing else; the page unpacks it through a canvas) and the plain .mp3 (`src`, relative) for a browser
+  opening the file. `deck.voice` names the voice; it is the Voice menu's first entry, and the browser's voices follow it.
+- Test ids: `play-all`, `play-stop`, `play-resume`, `play-speed` (0.9x-1.5x), `play-voice` (the recorded voice, then
+  `speechSynthesis.getVoices()`; with no recording an en-US "Natural" voice is preferred), `talk-chunk[data-chunk][data-say]`, `chunk-play`, `chunk-visual`, `sheet` (`#sheet-slot[data-id][data-kind]`),
   `sheet-pin` (`aria-pressed`), `option-pill`, `reply-box`.
 - One `SpeechSynthesisUtterance` per piece; `onend` moves on; `onerror` or a stall (watchdog: 2x the expected length + 4 s, at least 8 s)
   marks the piece `data-play-error="1"` and moves on; when the queue ends, `Resume` starts at the first failed piece. `Stop` cancels at
   once and `Resume` starts at the stopped piece. The playing piece has `data-playing="1"`.
 - The stage follows the playing piece unless `Pin visual` is pressed; a click on a piece or its chip always opens it (a click is an ask).
 - Test hooks: `window.__cockpitSynthOverride` (an object with `speak(u)`, `cancel()`, `getVoices()`), `window.__cockpitUtteranceCtor`,
+  `window.__cockpitAudioCtor` (stands in for `Audio`),
   and `window.__cockpitSpoken` (every utterance started: `{id, text}`; empty after load). See `tests/test_deck_page.py`.
 - Speed and voice are remembered in `localStorage` when the frame allows it. If the view has no speech engine, a note says so and the text
   and pictures still work.
@@ -109,5 +119,6 @@ chart | code | blocker | decision | sofar), badge, title, show_html, say, visual
 ## Run the tests
 
 From this folder: `uv run --no-project --with pytest --with playwright pytest -q tests` (run `uv run --no-project --with playwright
-playwright install chromium` once first; add `--with markdown-it-py` to cover the markdown-it path too). The talk-mode round trip (`tests/test_talk.py`) runs once `talk.py setup`
-has downloaded the models; it plays no sound and opens no microphone.
+playwright install chromium` once first; add `--with markdown-it-py` to cover the markdown-it path too). The voice tests (`tests/test_talk.py`: Sonia and Kokoro round trips, a page
+built with recorded audio) run once `talk.py setup` has downloaded the models, and Sonia's need internet; they play no sound and open no
+microphone.

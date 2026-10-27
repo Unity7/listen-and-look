@@ -194,8 +194,30 @@ a{color:var(--acc)}
 
   /* ---------------------------------------------------------------- the player: speaks ONLY on a click */
   function synth() { return window.__cockpitSynthOverride || window.speechSynthesis || null; }
+  /* a piece's made audio: `audio.png` is the .mp3 packed in a PNG (T3's html_render inlines local images as data: URIs, nothing else),
+     unpacked through a canvas; a browser opening the file plays `audio.src` instead */
+  var recorded = !!deck.voice && chunks.some(function (c) { return c.audio; }), urls = {};
+  function unpack(src) {
+    return new Promise(function (ok, bad) {
+      if (!src || src.indexOf("data:image/") !== 0) { bad(); return; }
+      var img = new Image();
+      img.onerror = bad;
+      img.onload = function () {
+        try {
+          var cv = document.createElement("canvas"); cv.width = img.width; cv.height = img.height;
+          var g = cv.getContext("2d"); g.drawImage(img, 0, 0);
+          var px = g.getImageData(0, 0, img.width, img.height).data, rgb = new Uint8Array(px.length / 4 * 3);
+          for (var k = 0, m = 0; k < px.length; k += 4) { rgb[m++] = px[k]; rgb[m++] = px[k + 1]; rgb[m++] = px[k + 2]; }
+          var n = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
+          ok(URL.createObjectURL(new Blob([rgb.slice(3, 3 + n)], {type: "audio/mpeg"})));
+        } catch (e) { bad(e); }
+      };
+      img.src = src;
+    });
+  }
+  function audioUrl(c) { return urls[c.id] || (urls[c.id] = unpack(c.audio.png).catch(function () { return c.audio.src; })); }
   var player = window.cockpitPlayer = {
-    rate: parseFloat(store("ll.rate")) || 1, voice: store("ll.voice") || "", run: 0, current: "", resumeId: "", failed: [],
+    rate: parseFloat(store("ll.rate")) || 1, voice: store("ll.voice") || "", run: 0, current: "", resumeId: "", failed: [], cut: null,
     status: function (t) { $('[data-testid="play-status"]').textContent = t || ""; },
     mark: function (id, attr, on) { var n = node(id); if (n) { if (on) n.setAttribute(attr, "1"); else n.removeAttribute(attr); } },
     utter: function (text) {
@@ -208,14 +230,14 @@ a{color:var(--acc)}
     },
     /* speak one chunk; cb(ok) once, on end, error or the watchdog (a stalled engine never hangs the queue) */
     speak: function (id, run, cb) {
-      var c = byId[id], s = synth();
+      var c = byId[id], s = synth(), made = !!(c && c.audio && recorded && !player.voice);
       if (!c) { cb(false); return; }
-      if (!s) { $('[data-testid="speech-missing"]').hidden = false; cb(false); return; }
+      if (!s && !made) { $('[data-testid="speech-missing"]').hidden = false; cb(false); return; }
       player.current = id;
       player.mark(id, "data-playing", true);
       player.mark(id, "data-play-error", false);
       show(id, false);
-      var settled = false, u = player.utter(c.say || "");
+      var settled = false;
       var words = (c.say || "").split(/\s+/).length;
       var limit = Math.max(8000, (words / 2.3 / player.rate) * 1000 * 2 + 4000);
       function settle(ok) {
@@ -225,13 +247,31 @@ a{color:var(--acc)}
         if (!ok) { player.mark(id, "data-play-error", true); player.failed.push(id); }
         cb(ok);
       }
-      var timer = setTimeout(function () { try { s.cancel(); } catch (e) {} settle(false); }, limit);
+      var timer = setTimeout(function () {
+        player.cut = null; /* a stall is a failure, not Stop's clean end */
+        if (run === player.run) player.hush();
+        settle(false);
+      }, limit);
+      window.__cockpitSpoken.push({id: id, text: c.say || ""});
+      if (made) {
+        player.cut = function () { settle(true); }; /* Stop: a paused <audio> fires nothing */
+        audioUrl(c).then(function (url) {
+          if (settled) return;
+          var A = window.__cockpitAudioCtor || window.Audio, a = player.audio = new A(url);
+          a.playbackRate = player.rate;
+          a.onended = function () { settle(true); };
+          a.onerror = function () { settle(false); };
+          var go = a.play();
+          if (go && go.catch) go.catch(function () { settle(false); });
+        });
+        return;
+      }
+      var u = player.utter(c.say || "");
       u.onend = function () { settle(true); };
       u.onerror = function (ev) {
         if (run !== player.run && ev && (ev.error === "interrupted" || ev.error === "canceled")) { settle(true); return; }
         settle(false);
       };
-      window.__cockpitSpoken.push({id: id, text: c.say || ""});
       try { s.speak(u); } catch (e) { settle(false); }
     },
     queue: function (ids) {
@@ -261,7 +301,13 @@ a{color:var(--acc)}
       player.queue(ids.slice(Math.max(at, 0)));
     },
     playOne: function (id) { player.run++; player.hush(); player.queue([id]); },
-    hush: function () { var s = synth(); try { if (s && (s.speaking || s.pending)) s.cancel(); } catch (e) {} },
+    hush: function () {
+      var a = player.audio, cut = player.cut;
+      player.audio = player.cut = null;
+      if (a) { try { a.pause(); } catch (e) {} }
+      if (cut) cut();
+      var s = synth(); try { if (s && (s.speaking || s.pending)) s.cancel(); } catch (e) {}
+    },
     stop: function () {
       var was = player.current;
       player.run++;
@@ -280,16 +326,19 @@ a{color:var(--acc)}
   if ([].some.call(speed.options, function (o) { return parseFloat(o.value) === player.rate; })) speed.value = String(player.rate);
   speed.addEventListener("change", function () { player.rate = parseFloat(speed.value) || 1; store("ll.rate", String(player.rate)); });
   var voiceSel = $('[data-testid="play-voice"]');
+  var first = '<option value="">' + esc(recorded ? deck.voice : "Default") + "</option>";
+  voiceSel.innerHTML = first;
   function voices() {
     var s = synth(); if (!s || !s.getVoices) return;
     var list = s.getVoices() || [];
     if (!list.length) return;
-    voiceSel.innerHTML = '<option value="">Default</option>' + list.map(function (v) { return '<option value="' + esc(v.name) + '">' + esc(v.name) + "</option>"; }).join("");
-    if (!player.voice) { var nat = list.filter(function (v) { return /natural/i.test(v.name) && /^en(-|_)US/i.test(v.lang || ""); })[0]; if (nat) player.voice = nat.name; }
+    if (player.voice && !list.some(function (v) { return v.name === player.voice; })) player.voice = "";
+    voiceSel.innerHTML = first + list.map(function (v) { return '<option value="' + esc(v.name) + '">' + esc(v.name) + "</option>"; }).join("");
+    if (!player.voice && !recorded) { var nat = list.filter(function (v) { return /natural/i.test(v.name) && /^en(-|_)US/i.test(v.lang || ""); })[0]; if (nat) player.voice = nat.name; }
     voiceSel.value = player.voice;
   }
   voiceSel.addEventListener("change", function () { player.voice = voiceSel.value; store("ll.voice", player.voice); });
-  if (!synth()) $('[data-testid="speech-missing"]').hidden = false;
+  if (!synth()) { player.voice = ""; if (!recorded) $('[data-testid="speech-missing"]').hidden = false; }
   else { voices(); try { if (window.speechSynthesis && "onvoiceschanged" in window.speechSynthesis) window.speechSynthesis.addEventListener("voiceschanged", voices); } catch (e) {} }
   if (chunks.length) show(chunks[0].id, true); /* the first picture shows; nothing is spoken until a click */
 })();

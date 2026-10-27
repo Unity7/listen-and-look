@@ -1,12 +1,14 @@
 # /// script
 # requires-python = ">=3.10,<3.14"
-# dependencies = ["faster-whisper>=1.1", "kokoro-onnx>=0.4", "sounddevice>=0.5", "numpy"]
+# dependencies = ["faster-whisper>=1.1", "kokoro-onnx>=0.4", "edge-tts>=7", "soundfile>=0.12", "sounddevice>=0.5", "numpy"]
 # ///
 """listen-and-look talk mode: speak a reply in a natural local voice and hear the user's answer, so an agent can hold a spoken
 conversation one turn at a time.
 
-Everything runs on this computer: Kokoro (kokoro-onnx) speaks, faster-whisper transcribes, a simple loudness check finds where speech
-starts and stops (the same approach and values as Row-Bot's voice mode). The microphone is open only while `listen` or `turn` runs.
+The voice is Microsoft's Sonia (a British neural voice through edge-tts: free, no key, needs internet) or, offline, any Kokoro voice
+(kokoro-onnx, on this computer); when Sonia can't be reached it falls back to Kokoro's British Emma. faster-whisper transcribes, and a
+simple loudness check finds where speech starts and stops (the same approach and values as Row-Bot's voice mode). The microphone is open
+only while `listen` or `turn` runs.
 
   uv run talk.py setup                       # download the voice and speech models once (~650 MB)
   uv run talk.py say "Hi there"              # speak (text from the argument, or stdin when none is given)
@@ -14,29 +16,35 @@ starts and stops (the same approach and values as Row-Bot's voice mode). The mic
   uv run talk.py turn < reply.txt            # say, then listen: one conversational turn in one call
   uv run talk.py say "Hi" --out hi.wav       # write the voice to a file instead of playing it
   uv run talk.py listen --wav hi.wav         # transcribe a file instead of the microphone
+  uv run talk.py audio --dir deck_audio < pieces.jsonl   # {"id", "text"} per line -> <id>.mp3 + <id>.png for a deck
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import io
 import json
 import os
+import struct
 import sys
 import time
 import urllib.request
 import wave
+import zlib
 from collections import deque
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # model downloads: no Windows symlink or token nags
 os.environ.setdefault("HF_HUB_VERBOSITY", "error")
-sys.path.insert(0,str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from chunk_transform import spoken  # noqa: E402 - same cleanup as the deck: paths, URLs, SHAs and markdown never get read aloud
 
 HOME = Path(os.environ.get("LISTEN_AND_LOOK_HOME") or Path.home() / ".cache" / "listen-and-look")
 KOKORO_BASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 KOKORO_FILES = ("kokoro-v1.0.fp16.onnx", "voices-v1.0.bin")
-VOICE = "af_heart"
+VOICE = "en-GB-SoniaNeural"  # a Microsoft neural voice (its name ends in "Neural"); Kokoro names look like af_heart, bf_emma
+OFFLINE_VOICE = "bf_emma"  # Kokoro, when the Microsoft voice cannot be reached
 WHISPER = "small"
 
 RATE = 16_000  # Whisper wants 16 kHz mono
@@ -85,12 +93,54 @@ def _whisper(size: str):
 
 # ---------------------------------------------------------------- speak
 
+def _edge(texts: list[str], voice: str, speed: float) -> list[bytes]:
+    """MP3s from Microsoft's neural voices (edge-tts), a few requests at a time."""
+    import edge_tts
+
+    gate = asyncio.Semaphore(4)
+
+    async def one(text: str) -> bytes:
+        async with gate:
+            buf = bytearray()
+            async for part in edge_tts.Communicate(text, voice, rate=f"{round((speed - 1) * 100):+d}%").stream():
+                if part["type"] == "audio":
+                    buf += part["data"]
+        if not buf:
+            raise RuntimeError("no audio came back")
+        return bytes(buf)
+
+    async def run() -> list[bytes]:
+        return list(await asyncio.gather(*(one(t) for t in texts)))
+
+    return asyncio.run(run())
+
+
+def mp3s(texts: list[str], voice: str, speed: float) -> tuple[str, list[bytes]]:
+    """(voice used, one MP3 per text). A Microsoft voice that can't be reached falls back to Kokoro for all of them."""
+    import soundfile as sf
+
+    if voice.endswith("Neural"):
+        try:
+            return voice, _edge(texts, voice, speed)
+        except Exception as e:  # noqa: BLE001 - offline, blocked or throttled: speak anyway
+            print(f"{voice} unavailable ({e}); using Kokoro {OFFLINE_VOICE}", file=sys.stderr, flush=True)
+            voice = OFFLINE_VOICE
+    kokoro, out = _kokoro(), []
+    for text in texts:
+        samples, rate = kokoro.create(text, voice=voice, speed=speed, lang="en-gb" if voice.startswith("b") else "en-us")
+        buf = io.BytesIO()
+        sf.write(buf, samples, rate, format="MP3")
+        out.append(buf.getvalue())
+    return voice, out
+
+
 def say(text: str, voice: str, speed: float, out: str | None, raw: bool) -> None:
     line = text if raw else " ".join(spoken(p) for p in text.splitlines() if p.strip())
     if not line.strip():
         return
-    lang = "en-gb" if voice.startswith("b") else "en-us"
-    samples, rate = _kokoro().create(line, voice=voice, speed=speed, lang=lang)
+    import soundfile as sf
+
+    samples, rate = sf.read(io.BytesIO(mp3s([line], voice, speed)[1][0]), dtype="float32")
     if out:
         _write_wav(out, samples, rate)
         return
@@ -109,6 +159,34 @@ def _write_wav(path: str, samples, rate: int) -> None:
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(pcm.tobytes())
+
+
+def _png(data: bytes) -> bytes:
+    """`data` packed into an opaque RGB PNG (3 bytes a pixel, the first 3 hold the length). T3 Code's html_render inlines local images
+    only, so a deck carries its audio this way and unpacks it with a canvas."""
+    data = len(data).to_bytes(3, "big") + data
+    w = 256
+    h = -(-len(data) // (3 * w))
+    data = data.ljust(w * h * 3, b"\0")
+    rows = b"".join(b"\0" + data[y * w * 3:(y + 1) * w * 3] for y in range(h))
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
+
+
+def audio(dir_: str, voice: str, speed: float) -> None:
+    """One deck's audio: each stdin line {"id", "text"} becomes <dir>/<id>.mp3 and <dir>/<id>.png; prints {"voice", "ids"}."""
+    out = Path(dir_)
+    out.mkdir(parents=True, exist_ok=True)
+    pieces = [p for p in (json.loads(line) for line in sys.stdin if line.strip()) if p.get("text", "").strip()]
+    used, sound = mp3s([p["text"] for p in pieces], voice, speed) if pieces else (voice, [])
+    for piece, mp3 in zip(pieces, sound):
+        (out / f"{piece['id']}.mp3").write_bytes(mp3)
+        (out / f"{piece['id']}.png").write_bytes(_png(mp3))
+    _out({"voice": used, "ids": [p["id"] for p in pieces]})
 
 
 # ---------------------------------------------------------------- listen
@@ -178,17 +256,21 @@ def listen(wait_s: float, wav: str | None, model: str) -> None:
 def main() -> None:
     for stream in (sys.stdin, sys.stdout):
         stream.reconfigure(encoding="utf-8", errors="replace")  # Windows consoles default to a code page
-    ap =argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup")
     for name in ("say", "turn"):
         p = sub.add_parser(name)
         p.add_argument("text", nargs="?", help="what to say (default: read stdin)")
-        p.add_argument("--voice", default=VOICE, help="Kokoro voice, e.g. af_heart, af_bella, am_michael, bf_emma")
+        p.add_argument("--voice", default=VOICE, help="en-GB-SoniaNeural (default) or another Microsoft voice, or Kokoro: af_heart, bf_emma ...")
         p.add_argument("--speed", type=float, default=1.0)
         p.add_argument("--raw", action="store_true", help="speak the text as given, without the deck's cleanup")
         if name == "say":
             p.add_argument("--out", help="write a .wav here instead of playing")
+    p = sub.add_parser("audio")
+    p.add_argument("--dir", required=True, help="write <id>.mp3 and <id>.png here")
+    p.add_argument("--voice", default=VOICE)
+    p.add_argument("--speed", type=float, default=1.0)
     for name in ("listen", "turn"):
         p = sub.choices.get(name) or sub.add_parser(name)
         p.add_argument("--wait", type=float, default=60, help="give up after this many seconds without speech")
@@ -198,6 +280,9 @@ def main() -> None:
     a = ap.parse_args()
     if a.cmd == "setup":
         setup()
+        return
+    if a.cmd == "audio":
+        audio(a.dir, a.voice, a.speed)
         return
     if a.cmd in ("say", "turn"):
         text = a.text if a.text is not None else sys.stdin.read()

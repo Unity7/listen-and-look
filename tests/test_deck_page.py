@@ -111,3 +111,67 @@ def test_stop_remembers_spot(browser, page_file):
     assert pg.evaluate("window.cockpitPlayer.resumeId") == "d-1"
     assert pg.locator('[data-playing="1"]').count() == 0 and pg.locator('[data-play-error="1"]').count() == 0
     assert errors == []
+
+
+# made audio: each piece plays its own recording (an .mp3 packed in a PNG, as T3 inlines it) instead of the browser voice
+FAKE_AUDIO = """
+window.__heard = [];
+window.__cockpitAudioCtor = function (url) {
+  var self = this;
+  this.pause = function () { self.paused = true; };
+  this.play = function () {
+    fetch(url).then(function (r) { return r.text(); }).then(function (t) {
+      window.__heard.push(t);
+      if (!window.__hang && !self.paused) setTimeout(function () { self.onended && self.onended(); }, 20);
+    });
+    return Promise.resolve();
+  };
+};
+"""
+
+
+@pytest.fixture(scope="module")
+def audio_page(tmp_path_factory):
+    import base64
+    tspec = importlib.util.spec_from_file_location("talk", HERE.parent / "scripts" / "talk.py")
+    talk = importlib.util.module_from_spec(tspec)
+    tspec.loader.exec_module(talk)
+    deck = ct.build_deck(ct.chunk_markdown("First piece.\n\nSecond piece.\n\nThird piece.", "a"), "Audio deck")
+    for c in deck["chunks"]:
+        c["audio"] = {"png": "data:image/png;base64," + base64.b64encode(talk._png(f"mp3-{c['id']}".encode())).decode(), "src": "none.mp3"}
+    deck["chunks"][2]["audio"] = {"png": "C:/not/inlined.png", "src": "data:audio/mpeg;base64," + base64.b64encode(b"src-a-3").decode()}
+    deck["voice"] = ct.voice_name("en-GB-SoniaNeural")
+    p = tmp_path_factory.mktemp("deck") / "deck.html"
+    p.write_text(ct.render_html(deck), encoding="utf-8")
+    return p
+
+
+def _open_audio(browser, page_file):
+    pg, errors = _open(browser, page_file)
+    pg.add_init_script(FAKE_AUDIO)
+    pg.reload()
+    pg.evaluate("() => { window.__cockpitSynthOverride.speak = function () { window.__synthUsed = true; }; }")
+    return pg, errors
+
+
+def test_made_audio_plays_instead_of_browser_voice(browser, audio_page):
+    pg, errors = _open_audio(browser, audio_page)
+    assert pg.locator('[data-testid="play-voice"] option').first.text_content() == "Sonia"
+    pg.wait_for_timeout(200)
+    assert pg.evaluate("window.__heard.length") == 0  # silent until a click
+    pg.click('[data-testid="play-all"]')
+    pg.wait_for_function("document.querySelector('[data-testid=play-status]').textContent === 'Done.'", timeout=5000)
+    assert pg.evaluate("window.__heard") == ["mp3-a-1", "mp3-a-2", "src-a-3"]  # unpacked from the PNG; the plain file when not inlined
+    assert pg.evaluate("window.__synthUsed || false") is False
+    assert errors == []
+
+
+def test_made_audio_stop_remembers_spot(browser, audio_page):
+    pg, errors = _open_audio(browser, audio_page)
+    pg.evaluate("window.__hang = true")
+    pg.click('[data-testid="play-all"]')
+    pg.wait_for_function("window.__heard.length === 1", timeout=5000)
+    pg.click('[data-testid="play-stop"]')
+    assert pg.evaluate("window.cockpitPlayer.resumeId") == "a-1"
+    assert pg.locator('[data-playing="1"]').count() == 0 and pg.locator('[data-play-error="1"]').count() == 0
+    assert errors == []

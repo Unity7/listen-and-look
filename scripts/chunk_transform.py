@@ -1,7 +1,8 @@
 """listen-and-look: turn a markdown reply into a deck of playable chunks with clean spoken text.
 
 Pure and deterministic: no model call, no network, standard library only (markdown-it-py renders `show_html` when it is
-importable, else a small escape-first renderer does).
+importable, else a small escape-first renderer does). The one exception is the deck's voice: with `--html`, each piece's spoken text is
+rendered to audio by talk.py (through uv) unless `--voice browser` is given; without uv or a voice the page falls back to the browser's.
 
 Chunk dict: {id, n, kind, badge, title, show_html, say, visual, options}; a deck adds {deck_id, title, subtitle, project,
 updated_pt, kpis, chunks}. See ../SKILL.md.
@@ -10,6 +11,7 @@ CLI (writes a self-contained page for T3 `html_render` from ../resources/deck_te
   python chunk_transform.py reply.md --title "Kit status" --project my-app --html deck.html
   python chunk_transform.py deck_in.json --html deck.html   # a partial deck: chunks given as {"md": ..., "visual": {...}}
   python chunk_transform.py reply.md --json deck.json        # the deck data only
+  python chunk_transform.py reply.md --html deck.html --voice browser   # no audio files: the browser's own voices
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ import argparse
 import html
 import json
 import re
+import shutil
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,6 +33,8 @@ LONG_ROWS = 5  # a table this long is summarized aloud
 CODE_INLINE_MAX = 8  # a fence longer than this shows as a summary + visual
 TEMPLATE = Path(__file__).resolve().parent.parent / "resources" / "deck_template.html"
 PLACEHOLDER = "__DECK_JSON__"
+TALK = Path(__file__).resolve().parent / "talk.py"
+VOICE = "en-GB-SoniaNeural"  # talk.py's default; "browser" skips the audio
 
 try:  # optional: a full CommonMark renderer
     from markdown_it import MarkdownIt
@@ -502,6 +508,39 @@ def render_html(deck: dict, template: Path = TEMPLATE) -> str:
     return page.replace(PLACEHOLDER, deck_json(deck), 1)
 
 
+def voice_name(voice: str) -> str:
+    """'en-GB-SoniaNeural' -> 'Sonia', 'bf_emma' -> 'Emma'."""
+    m = re.match(r"^[a-z]{2}-[A-Z]{2}-(.+?)(?:Multilingual)?Neural$", voice) or re.match(r"^[a-z]{2}_(.+)$", voice)
+    return (m.group(1) if m else voice).capitalize()
+
+
+def add_audio(deck: dict, html_path: Path, voice: str = VOICE) -> bool:
+    """Render every piece's `say` with talk.py into <page>_audio/ next to the page and point each chunk at it: `audio.png` (absolute, so
+    T3's html_render inlines it) and `audio.src` (the .mp3, relative, for a browser opening the file). False, and the deck unchanged,
+    when uv or the voice is unavailable."""
+    if not shutil.which("uv"):
+        print("no uv: the page uses the browser's voices", file=sys.stderr)
+        return False
+    out = html_path.resolve().parent / f"{html_path.stem}_audio"
+    out.mkdir(parents=True, exist_ok=True)
+    for old in [*out.glob("*.mp3"), *out.glob("*.png")]:
+        old.unlink()
+    lines = "".join(json.dumps({"id": c["id"], "text": c.get("say", "")}) + "\n" for c in deck["chunks"])
+    try:
+        done = subprocess.run(["uv", "run", "--quiet", str(TALK), "audio", "--dir", str(out), "--voice", voice], input=lines,
+                              capture_output=True, text=True, encoding="utf-8", timeout=600, check=True)
+        got = json.loads(done.stdout.strip().splitlines()[-1])
+    except (subprocess.SubprocessError, ValueError, IndexError) as e:
+        err = getattr(e, "stderr", "") or ""
+        print(f"no audio ({type(e).__name__}): the page uses the browser's voices. {err.strip()[-300:]}", file=sys.stderr)
+        return False
+    for c in deck["chunks"]:
+        if c["id"] in got["ids"]:
+            c["audio"] = {"png": (out / f"{c['id']}.png").as_posix(), "src": f"{out.name}/{c['id']}.mp3"}
+    deck["voice"] = voice_name(got["voice"])
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("source", help="a .md reply or a partial deck .json ('-' reads markdown from stdin)")
@@ -510,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--project", default="")
     ap.add_argument("--html", help="write the self-contained deck page here")
     ap.add_argument("--json", help="write the deck data here")
+    ap.add_argument("--voice", default=VOICE, help="voice for the page's audio (talk.py names), or 'browser' for none")
     a = ap.parse_args(argv)
     raw = sys.stdin.read() if a.source == "-" else Path(a.source).read_text(encoding="utf-8")
     if a.source.endswith(".json"):
@@ -523,6 +563,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.json:
         Path(a.json).write_text(json.dumps(deck, ensure_ascii=False, indent=1), encoding="utf-8")
     if a.html:
+        if a.voice != "browser":
+            add_audio(deck, Path(a.html), a.voice)
         Path(a.html).write_text(render_html(deck), encoding="utf-8")
     if not (a.json or a.html):
         sys.stdout.write(json.dumps(deck, ensure_ascii=False, indent=1) + "\n")
